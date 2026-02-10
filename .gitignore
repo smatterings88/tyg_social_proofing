@@ -1,0 +1,15 @@
+# Node
+node_modules
+npm-debug.log*
+
+# Firebase functions
+functions/node_modules
+functions/lib
+
+# Environment
+.env
+.env.local
+
+# macOS
+.DS_Store
+
