@@ -150,6 +150,7 @@ exports.getMessages = functions.https.onRequest((req, res) => {
 });
 
 const csvFilePath = path.join(__dirname, 'thank_you_grams.csv');
+const globalCsvFilePath = path.join(__dirname, 'global_thank_you_grams.csv');
 
 /**
  * Load seed messages from the bundled CSV file.
@@ -169,6 +170,27 @@ function loadSeedMessages() {
     state: row.State,
     date: row.Date,
     location: `${row.City}, ${row.State}`,
+  }));
+}
+
+/**
+ * Load global seed messages from the global CSV file.
+ * @return {Array<object>}
+ */
+function loadGlobalSeedMessages() {
+  const fileContents = fs.readFileSync(globalCsvFilePath, 'utf8');
+  const parsed = Papa.parse(fileContents, {
+    header: true,
+    skipEmptyLines: true,
+  });
+
+  return parsed.data.map((row) => ({
+    tone: row.Tone,
+    message: row.Message,
+    city: row.City,
+    country: row.Country,
+    date: row.Date,
+    location: `${row.City}, ${row.Country}`,
   }));
 }
 
@@ -201,6 +223,40 @@ exports.seedThankYouMessages = functions.https.onRequest((req, res) => {
     } catch (error) {
       console.error('Error seeding messages:', error);
       res.status(500).json({error: 'Failed to seed messages'});
+    }
+  });
+});
+
+/**
+ * Seed the "messages" collection with global thank-you grams.
+ */
+exports.seedGlobalThankYouMessages = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== 'POST') {
+      return res.status(405).json({error: 'Method not allowed'});
+    }
+
+    try {
+      const db = admin.firestore();
+      const seedMessages = loadGlobalSeedMessages();
+
+      const batch = db.batch();
+      seedMessages.forEach((msg) => {
+        const ref = db.collection('messages').doc();
+        batch.set(ref, {
+          ...msg,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          title: msg.tone || 'Message',
+          content: msg.message,
+        });
+      });
+
+      await batch.commit();
+
+      res.json({success: true, count: seedMessages.length});
+    } catch (error) {
+      console.error('Error seeding global messages:', error);
+      res.status(500).json({error: 'Failed to seed global messages'});
     }
   });
 });
