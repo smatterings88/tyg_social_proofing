@@ -30,6 +30,14 @@ exports.getSocialProofMessages = functions.https.onRequest((req, res) => {
         messages.push(doc.data());
       });
 
+      // Shuffle messages so callers always see a random order.
+      for (let i = messages.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = messages[i];
+        messages[i] = messages[j];
+        messages[j] = tmp;
+      }
+
       // Set cache headers (5 minutes)
       res.set('Cache-Control', 'public, max-age=300, s-maxage=600');
       res.json({messages});
@@ -105,15 +113,25 @@ exports.getMessages = functions.https.onRequest((req, res) => {
         }
 
         return {
+          // Include the original document data first, then override with
+          // normalized fields expected by the frontend.
+          ...data,
           id: doc.id,
           // Common fields expected by the frontend.
           title: data.title || '',
           content: data.content || data.text || '',
           createdAt,
-          // Include the rest of the document in case it's useful.
-          ...data,
         };
       });
+
+      // Shuffle within this page so the visible order feels random,
+      // while pagination still relies on the underlying Firestore cursor.
+      for (let i = messages.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = messages[i];
+        messages[i] = messages[j];
+        messages[j] = tmp;
+      }
 
       const lastVisible = snapshot.docs[snapshot.docs.length - 1] || null;
       const nextLastDocId = lastVisible ? lastVisible.id : null;
@@ -167,7 +185,14 @@ exports.seedThankYouMessages = functions.https.onRequest((req, res) => {
       const batch = db.batch();
       seedMessages.forEach((msg) => {
         const ref = db.collection('messages').doc();
-        batch.set(ref, msg);
+        batch.set(ref, {
+          ...msg,
+          // Ensure the infinite scroll API can order by createdAt.
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          // Provide basic title/content fields expected by getMessages.
+          title: msg.tone || 'Message',
+          content: msg.message,
+        });
       });
 
       await batch.commit();
