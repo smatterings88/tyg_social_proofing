@@ -27,7 +27,12 @@ exports.getSocialProofMessages = functions.https.onRequest((req, res) => {
 
       const messages = [];
       snapshot.forEach((doc) => {
-        messages.push(doc.data());
+        const data = doc.data();
+        // Normalize tone for widgets: "Ray of Sunshine" → "Sunshine"
+        if (data.tone === 'Ray of Sunshine') {
+          data.tone = 'Sunshine';
+        }
+        messages.push(data);
       });
 
       // Shuffle messages so callers always see a random order.
@@ -151,6 +156,7 @@ exports.getMessages = functions.https.onRequest((req, res) => {
 
 const csvFilePath = path.join(__dirname, 'thank_you_grams.csv');
 const globalCsvFilePath = path.join(__dirname, 'global_thank_you_grams.csv');
+const becauseOfYouCsvPath = path.join(__dirname, 'because_of_you_300_samples.csv');
 
 /**
  * Load seed messages from the bundled CSV file.
@@ -192,6 +198,39 @@ function loadGlobalSeedMessages() {
     date: row.Date,
     location: `${row.City}, ${row.Country}`,
   }));
+}
+
+/**
+ * Load "because of you" seed messages from the bundled CSV.
+ * CSV columns: Tone, Message, City, State, Country, Date
+ * @return {Array<object>}
+ */
+function loadBecauseOfYouSeedMessages() {
+  const fileContents = fs.readFileSync(becauseOfYouCsvPath, 'utf8');
+  const parsed = Papa.parse(fileContents, {
+    header: true,
+    skipEmptyLines: true,
+  });
+
+  return parsed.data.map((row) => {
+    const city = row.City || '';
+    const state = (row.State || '').trim();
+    const country = (row.Country || '').trim();
+    const location = state
+      ? `${city}, ${state}`
+      : country
+        ? `${city}, ${country}`
+        : city || 'Unknown';
+    return {
+      tone: row.Tone,
+      message: row.Message,
+      city,
+      state,
+      country,
+      date: row.Date,
+      location,
+    };
+  });
 }
 
 exports.seedThankYouMessages = functions.https.onRequest((req, res) => {
@@ -257,6 +296,189 @@ exports.seedGlobalThankYouMessages = functions.https.onRequest((req, res) => {
     } catch (error) {
       console.error('Error seeding global messages:', error);
       res.status(500).json({error: 'Failed to seed global messages'});
+    }
+  });
+});
+
+/**
+ * Seed the "messages" collection with "because of you" samples.
+ */
+exports.seedBecauseOfYouMessages = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== 'POST') {
+      return res.status(405).json({error: 'Method not allowed'});
+    }
+
+    try {
+      const db = admin.firestore();
+      const seedMessages = loadBecauseOfYouSeedMessages();
+
+      const batch = db.batch();
+      seedMessages.forEach((msg) => {
+        const ref = db.collection('messages').doc();
+        batch.set(ref, {
+          ...msg,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          title: msg.tone || 'Message',
+          content: msg.message,
+        });
+      });
+
+      await batch.commit();
+
+      res.json({success: true, count: seedMessages.length});
+    } catch (error) {
+      console.error('Error seeding because-of-you messages:', error);
+      res.status(500).json({error: 'Failed to seed because-of-you messages'});
+    }
+  });
+});
+
+// Valid tone values for Thank-you Grams (case-sensitive).
+const VALID_TONES = ['Big Hug', 'High Five', 'Coffee Break', 'Sunshine'];
+
+/**
+ * Backfill missing "tone" field on existing messages with a random valid tone.
+ * Call once via POST to fix documents that don't have tone set.
+ */
+exports.backfillToneField = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== 'POST') {
+      return res.status(405).json({error: 'Method not allowed'});
+    }
+
+    try {
+      const db = admin.firestore();
+      const snapshot = await db.collection('messages').get();
+      const BATCH_LIMIT = 500;
+      const batches = [];
+      let currentBatch = db.batch();
+      let opCount = 0;
+      let backfilled = 0;
+
+      snapshot.docs.forEach((doc) => {
+        const data = doc.data();
+        const hasTone =
+          data.tone && VALID_TONES.includes(data.tone);
+        if (!hasTone) {
+          const randomTone =
+            VALID_TONES[Math.floor(Math.random() * VALID_TONES.length)];
+          currentBatch.update(doc.ref, {tone: randomTone});
+          opCount++;
+          backfilled++;
+          if (opCount >= BATCH_LIMIT) {
+            batches.push(currentBatch);
+            currentBatch = db.batch();
+            opCount = 0;
+          }
+        }
+      });
+
+      if (opCount > 0) {
+        batches.push(currentBatch);
+      }
+      for (const batch of batches) {
+        await batch.commit();
+      }
+
+      return res.json({
+        success: true,
+        backfilled,
+        totalDocuments: snapshot.size,
+      });
+    } catch (error) {
+      console.error('Error backfilling tone:', error);
+      return res.status(500).json({error: 'Failed to backfill tone field'});
+    }
+  });
+});
+
+/**
+ * Seed 8 example messages (2 per tone) for Thank-you Gram structure.
+ */
+const EXAMPLE_TONE_MESSAGES = [
+  {
+    tone: 'Big Hug',
+    message:
+      'Just a heartfelt thank you for being you. You\'re truly one of a kind.',
+    location: 'Austin, Texas',
+  },
+  {
+    tone: 'Big Hug',
+    message:
+      'Sending a warm embrace your way. Your kindness has meant more than you know.',
+    location: 'Portland, Oregon',
+  },
+  {
+    tone: 'High Five',
+    message:
+      'You absolutely crushed it this week! High five from the whole team.',
+    location: 'Denver, Colorado',
+  },
+  {
+    tone: 'High Five',
+    message:
+      'Boom! Another win. Thanks for bringing the energy every single day.',
+    location: 'Seattle, Washington',
+  },
+  {
+    tone: 'Coffee Break',
+    message:
+      'Quick note to say I appreciate your professionalism and hard work.',
+    location: 'Boston, Massachusetts',
+  },
+  {
+    tone: 'Coffee Break',
+    message:
+      'Thanks for the smooth handoff. You\'ve made this project so much easier.',
+    location: 'Chicago, Illinois',
+  },
+  {
+    tone: 'Sunshine',
+    message:
+      'Sending a little sunshine your way! Hope something wonderful happens today.',
+    location: 'Miami, Florida',
+  },
+  {
+    tone: 'Sunshine',
+    message:
+      'You\'re a ray of light. Thanks for always bringing the good vibes.',
+    location: 'San Diego, California',
+  },
+];
+
+exports.seedExampleToneMessages = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== 'POST') {
+      return res.status(405).json({error: 'Method not allowed'});
+    }
+
+    try {
+      const db = admin.firestore();
+      const batch = db.batch();
+
+      EXAMPLE_TONE_MESSAGES.forEach((msg) => {
+        const ref = db.collection('messages').doc();
+        batch.set(ref, {
+          message: msg.message,
+          location: msg.location,
+          tone: msg.tone,
+          title: msg.tone,
+          content: msg.message,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+
+      await batch.commit();
+      return res.json({
+        success: true,
+        count: EXAMPLE_TONE_MESSAGES.length,
+      });
+    } catch (error) {
+      console.error('Error seeding example tone messages:', error);
+      return res.status(500).json({
+        error: 'Failed to seed example messages',
+      });
     }
   });
 });
